@@ -38,12 +38,12 @@ streamlit run app.py
 
 
 **Tech Stack**
-Python 3
-Streamlit – UI layer
-Pandas – data wrangling
-Folium – interactive maps
-Geopy – geocoding
-Matplotlib & Seaborn – visualizations
+ - Python 3
+ - Streamlit – UI layer
+ - Pandas – data wrangling
+ - Folium – interactive maps
+ - Geopy – geocoding
+ - Matplotlib & Seaborn – visualizations
 
 
 💡 Future Ideas
