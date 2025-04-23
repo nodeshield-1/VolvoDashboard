@@ -55,6 +55,9 @@ Heatmap of frequent routes or stops
 
 Charts for fuel efficiency over time
 
+🔐 Notes on Privacy
+The app processes location and odometer data locally and does not store or share any data externally. If you wish to anonymize data before using the dashboard, it's easy to do with a simple script or spreadsheet.
+
 
 🤝 Contributing
 Pull requests are welcome! If you have ideas, improvements, or would like to collaborate, feel free to open an issue or PR.
