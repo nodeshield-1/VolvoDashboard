@@ -8,9 +8,19 @@ from folium.plugins import HeatMap, MarkerCluster
 import numpy as np
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
+from streamlit_folium import st_folium
 
 # Set Streamlit page config at the very top
 st.set_page_config(page_title="Volvo Driving Journal", layout="wide")
+
+# Header and introduction
+st.title("Volvo Driving Journal Dashboard")
+st.markdown("""
+This dashboard visualizes your driving data from the Volvo Driving Journal export. 
+It shows metrics for fuel consumption, battery usage, and distances traveled.
+
+**To see map visualizations:** Click the 'Load Map Data' button in the sidebar.
+""")
 
 # Initialize session state for unit preference
 if 'use_imperial' not in st.session_state:
@@ -35,7 +45,12 @@ def liters_to_gallons(liters):
 # LOAD AND CLEAN DATA
 # =====================
 def load_data():
-    input_file = 'volvo_driving_journal.csv'
+    # Allow user to select the input file
+    input_file = st.sidebar.selectbox(
+        "Select data file",
+        ["volvo_driving_journal.csv", "test_sample.csv"],
+        index=0
+    )
     try:
         df = pd.read_csv(input_file, encoding='utf-16', delimiter=';')
     except UnicodeDecodeError:
@@ -139,44 +154,102 @@ def geocode_address(address, _geolocator, retries=3, timeout=5):
 def add_lat_lon(df):
     geolocator = Nominatim(user_agent="volvo_driving_app")
     st.info("Geocoding addresses. This might take a while...")
+    
+    # Add a progress bar
+    progress_bar = st.progress(0)
+    total_rows = len(df)
+    
+    # Ask for location context to improve geocoding accuracy
+    location_context = st.text_input(
+        "Enter your city and state/country for better geocoding accuracy (e.g., 'Boston, MA, USA')",
+        value="New York, NY, USA"
+    )
+    
     start_latitudes = []
     start_longitudes = []
     end_latitudes = []
     end_longitudes = []
-    for _, row in df.iterrows():
-        start_lat, start_lon = geocode_address(row['Start address'], geolocator)
+    
+    for i, (_, row) in enumerate(df.iterrows()):
+        # Add location context to addresses for better geocoding
+        start_address = f"{row['Start address']}, {location_context}" if pd.notna(row['Start address']) else None
+        end_address = f"{row['End address']}, {location_context}" if pd.notna(row['End address']) else None
+        
+        # Geocode with improved addresses
+        start_lat, start_lon = geocode_address(start_address, geolocator)
         start_latitudes.append(start_lat)
         start_longitudes.append(start_lon)
-        end_lat, end_lon = geocode_address(row['End address'], geolocator)
+        
+        end_lat, end_lon = geocode_address(end_address, geolocator)
         end_latitudes.append(end_lat)
         end_longitudes.append(end_lon)
+        
+        # Update progress
+        progress_bar.progress((i + 1) / total_rows)
 
     df['Latitude_Start'] = start_latitudes
     df['Longitude_Start'] = start_longitudes
     df['Latitude_End'] = end_latitudes
     df['Longitude_End'] = end_longitudes
+    
+    # Add the location context used to the dataframe for reference
+    df.attrs['location_context'] = location_context
+    
     st.success("Geocoding complete!")
     return df
 
 df = load_data()
 
-# Geocode if missing
-if 'Latitude_Start' not in df.columns or 'Longitude_Start' not in df.columns or 'Latitude_End' not in df.columns or 'Longitude_End' not in df.columns:
-    df = add_lat_lon(df.copy())
+# Initialize geocoding state
+if 'geocoding_done' not in st.session_state:
+    st.session_state.geocoding_done = False
+
+# Make geocoding optional via a button
+if ('Latitude_Start' not in df.columns or 'Longitude_Start' not in df.columns or 
+    'Latitude_End' not in df.columns or 'Longitude_End' not in df.columns):
+    if not st.session_state.geocoding_done:
+        geocode_button = st.sidebar.button("Load Map Data (Geocode Addresses)")
+        if geocode_button:
+            # Update the dataframe with geocoded data and store in session state
+            geocoded_df = add_lat_lon(df.copy())
+            
+            # Store state to session so it persists on rerun
+            st.session_state.geocoding_done = True
+            
+            # Also store geocoded data to session to preserve it
+            st.session_state.geocoded_df = geocoded_df
+            
+            # Force a rerun to update the UI
+            st.rerun()
+    else:
+        # Try to recover geocoded data from session state
+        if 'geocoded_df' in st.session_state:
+            df = st.session_state.geocoded_df
+        st.sidebar.success("Map data loaded successfully!")
+else:
+    st.session_state.geocoding_done = True
 
 # =====================
 # ODOMETER CORRECTION
 # =====================
 # Get unit system from dataframe metadata
 is_imperial = df.attrs.get('is_imperial', False)
-distance_unit = 'miles' if is_imperial else 'km'
+distance_unit = 'miles' if st.session_state.use_imperial else 'km'
 
 if 'Start odometer (km)' in df.columns and 'End odometer (km)' in df.columns:
     df = df.sort_values(by='Started')
     df['Distance Calculated'] = df['End odometer (km)'] - df['Start odometer (km)']
     distance_difference = (df['Distance Calculated'] - df['Distance (km)']).abs()
+    
     if distance_difference.max() > 1:
-        st.warning(f"Significant difference found. Max difference: {distance_difference.max():.2f} km.")
+        # Display the warning with the proper unit based on user preference
+        if st.session_state.use_imperial:
+            # Convert the max difference to miles for display
+            max_diff_miles = distance_difference.max() * 0.621371
+            st.warning(f"Significant difference found between odometer readings and recorded distances. Max difference: {max_diff_miles:.2f} miles.")
+        else:
+            st.warning(f"Significant difference found between odometer readings and recorded distances. Max difference: {distance_difference.max():.2f} km.")
+            
         df['Cumulative Distance (km)'] = df['Distance (km)'].cumsum()
     else:
         df['Cumulative Distance (km)'] = df['Distance Calculated'].cumsum()
@@ -227,8 +300,14 @@ else:
         df['Total Distance (km)'] = df['Cumulative Distance (km)']
         df['Total Distance (miles)'] = df['Cumulative Distance (miles)']
 
-location_df = df[['Latitude_Start', 'Longitude_Start', 'Latitude_End', 'Longitude_End']].copy()
-location_df = location_df.dropna(how='all')
+# Only create location dataframe if geocoding has been done
+if ('Latitude_Start' in df.columns and 'Longitude_Start' in df.columns and 
+    'Latitude_End' in df.columns and 'Longitude_End' in df.columns):
+    location_df = df[['Latitude_Start', 'Longitude_Start', 'Latitude_End', 'Longitude_End']].copy()
+    location_df = location_df.dropna(how='all')
+else:
+    # Create an empty location dataframe with the right columns
+    location_df = pd.DataFrame(columns=['Latitude_Start', 'Longitude_Start', 'Latitude_End', 'Longitude_End'])
 
 def haversine(lat1, lon1, lat2, lon2):
     """
@@ -254,21 +333,34 @@ def haversine(lat1, lon1, lat2, lon2):
 # This is because geocoding might not be accurate enough for precise distance calculations
 # We'll only calculate the route lengths for display on maps
 
-# Store the calculated direct-line distances for potential map visualizations
-# but we won't use them for metrics display
-df['Direct Distance (km)'] = df.apply(
-    lambda row: haversine(row['Latitude_Start'], row['Longitude_Start'], 
-                         row['Latitude_End'], row['Longitude_End']), 
-    axis=1
-)
-df['Direct Distance (miles)'] = df['Direct Distance (km)'].apply(km_to_miles)
+# Only calculate direct-line distances if geocoding has been done
+if st.session_state.geocoding_done:
+    # Store the calculated direct-line distances for potential map visualizations
+    # but we won't use them for metrics display
+    df['Direct Distance (km)'] = df.apply(
+        lambda row: haversine(row['Latitude_Start'], row['Longitude_Start'], 
+                             row['Latitude_End'], row['Longitude_End']), 
+        axis=1
+    )
+    df['Direct Distance (miles)'] = df['Direct Distance (km)'].apply(km_to_miles)
+else:
+    # Add placeholder columns to avoid errors elsewhere in the code
+    df['Direct Distance (km)'] = 0
+    df['Direct Distance (miles)'] = 0
 
 # =====================
 # UNIT SELECTION
 # =====================
 st.sidebar.title("Settings")
-unit_toggle = st.sidebar.checkbox("Use Imperial Units (miles, gallons)", value=st.session_state.use_imperial)
-st.session_state.use_imperial = unit_toggle
+
+# Only update session state if the value actually changes
+prev_imperial_setting = st.session_state.use_imperial
+unit_toggle = st.sidebar.checkbox("Use Imperial Units (miles, gallons)", value=prev_imperial_setting)
+
+# Check if toggle state has changed, and if so, force a rerun
+if unit_toggle != prev_imperial_setting:
+    st.session_state.use_imperial = unit_toggle
+    st.rerun()  # Force rerun to update all calculations and displays
 
 # Determine which unit system to display based on user preference
 if st.session_state.use_imperial:
@@ -309,6 +401,36 @@ col2.metric("Avg Battery Consumption (kWh)", f"{df['Battery consumption (kWh)'].
 st.subheader(f"🛣️ Distance Metrics ({distance_unit})")
 col1, col2, col3 = st.columns(3)
 
+# Add debugging section with a toggle
+debug_toggle = st.sidebar.checkbox("Show Debug Info", value=False)
+if debug_toggle:
+    st.subheader("Debug Information")
+    st.write(f"DataFrame shape: {df.shape}")
+    st.write(f"DataFrame columns: {df.columns.tolist()}")
+    st.write(f"Missing values in key columns: {df[['Started', 'Distance (km)']].isna().sum().to_dict()}")
+    st.write(f"Geocoding state: {st.session_state.geocoding_done}")
+    st.write(f"Unit system (imperial): {st.session_state.use_imperial}")
+    
+    # Check if geocoding columns exist and display stats
+    geo_cols = [col for col in df.columns if col.startswith('Latitude') or col.startswith('Longitude')]
+    if geo_cols:
+        st.write(f"Geocoding columns: {geo_cols}")
+        st.write(f"Non-null geocoding values: {df[geo_cols].count().to_dict()}")
+        if 'location_context' in df.attrs:
+            st.write(f"Location context used for geocoding: {df.attrs['location_context']}")
+    
+    st.write("Data Sample (first 3 rows):")
+    st.dataframe(df.head(3))
+    
+    # If there are geocoded locations, show the first few to verify
+    if geo_cols and not df[geo_cols].dropna().empty:
+        st.write("First few geocoded addresses:")
+        for i, row in df.head(3).iterrows():
+            if pd.notna(row.get('Latitude_Start')) and pd.notna(row.get('Longitude_Start')):
+                st.write(f"Start: {row['Start address']} → ({row['Latitude_Start']:.5f}, {row['Longitude_Start']:.5f})")
+            if pd.notna(row.get('Latitude_End')) and pd.notna(row.get('Longitude_End')):
+                st.write(f"End: {row['End address']} → ({row['Latitude_End']:.5f}, {row['Longitude_End']:.5f})")
+
 if st.session_state.use_imperial:
     total_dist = df['Total Distance (miles)'].max() if not df.empty else 0
     total_traveled = df['Distance (miles)'].sum() if not df.empty else 0
@@ -331,3 +453,80 @@ else:
     col2.metric(f"Total Distance Traveled ({distance_unit})", f"{total_traveled:.1f}")
     col3.metric(f"Average Trip Distance ({distance_unit})", f"{avg_trip:.1f}")
 
+# =====================
+# MAP VISUALIZATION
+# =====================
+if st.session_state.geocoding_done:
+    # Make sure geocoding columns actually exist
+    if ('Latitude_Start' in df.columns and 'Longitude_Start' in df.columns and 
+        'Latitude_End' in df.columns and 'Longitude_End' in df.columns):
+        
+        st.subheader("🗺️ Trip Map Visualization")
+        
+        # Create a map centered at the mean of start and end coordinates
+        valid_starts = df[['Latitude_Start', 'Longitude_Start']].dropna()
+        valid_ends = df[['Latitude_End', 'Longitude_End']].dropna()
+        
+        if not valid_starts.empty and not valid_ends.empty:
+            # Calculate center point for the map
+            center_lat = (valid_starts['Latitude_Start'].mean() + valid_ends['Latitude_End'].mean()) / 2
+            center_lon = (valid_starts['Longitude_Start'].mean() + valid_ends['Longitude_End'].mean()) / 2
+            
+            # Create a map
+            m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+            
+            # Add markers for all start and end points
+            marker_cluster = MarkerCluster().add_to(m)
+            
+            # Add start points (green)
+            for idx, row in valid_starts.iterrows():
+                folium.Marker(
+                    location=[row['Latitude_Start'], row['Longitude_Start']],
+                    popup=f"Start: {df.at[idx, 'Start address']}",
+                    icon=folium.Icon(color='green', icon='play')
+                ).add_to(marker_cluster)
+                
+            # Add end points (red)
+            for idx, row in valid_ends.iterrows():
+                folium.Marker(
+                    location=[row['Latitude_End'], row['Longitude_End']],
+                    popup=f"End: {df.at[idx, 'End address']}",
+                    icon=folium.Icon(color='red', icon='stop')
+                ).add_to(marker_cluster)
+                
+            # Add lines connecting start to end points
+            for idx, row in df.dropna(subset=['Latitude_Start', 'Longitude_Start', 'Latitude_End', 'Longitude_End']).iterrows():
+                folium.PolyLine(
+                    locations=[
+                        [row['Latitude_Start'], row['Longitude_Start']],
+                        [row['Latitude_End'], row['Longitude_End']]
+                    ],
+                    color='blue',
+                    weight=2,
+                    opacity=0.7,
+                    popup=f"Trip: {row['Distance (km)']:.1f} km / {row['Distance (miles)']:.1f} miles"
+                ).add_to(m)
+                
+            # Display the map
+            st_data = st_folium(m, width=1200, height=600)
+            
+            # Also add a heatmap in a separate tab
+            st.subheader("🔥 Trip Density Heatmap")
+            
+            # Create heatmap data
+            heat_data = []
+            for idx, row in df.dropna(subset=['Latitude_Start', 'Longitude_Start']).iterrows():
+                heat_data.append([row['Latitude_Start'], row['Longitude_Start'], 1])
+            for idx, row in df.dropna(subset=['Latitude_End', 'Longitude_End']).iterrows():
+                heat_data.append([row['Latitude_End'], row['Longitude_End'], 1])
+                
+            # Create another map for the heatmap
+            m_heat = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+            
+            # Add heatmap layer
+            HeatMap(heat_data).add_to(m_heat)
+            
+            # Display the heatmap
+            st_folium(m_heat, width=1200, height=600)
+        else:
+            st.warning("Geocoding completed but no valid coordinates were found. The map cannot be displayed.")
